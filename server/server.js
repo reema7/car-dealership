@@ -450,6 +450,16 @@ app.post('/api/passkey/verify-high-value', authenticateToken, (req, res) => {
   }
 });
 
+// Add this route to handle favicon requests
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end(); // No content response
+});
+
+app.get('/favicon.png', (req, res) => {
+  res.status(204).end(); // No content response
+});
+
+
 // Get all cars
 app.get('/api/cars', (req, res) => {
   const carList = Array.from(cars.values());
