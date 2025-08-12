@@ -244,7 +244,7 @@ app.post('/api/passkey/register/begin', authenticateToken, (req, res) => {
     const options = {
       rp: {
         name: "AutoDealer Pro",
-        id: "localhost" // Change to your domain in production
+        id: "car-dealership-client.vercel.app" // Change to your domain in production
       },
       user: {
         id: userId,
@@ -320,7 +320,7 @@ app.post('/api/passkey/authenticate/begin', (req, res) => {
     const options = {
       challenge: challenge,
       timeout: 60000,
-      rpId: "localhost", // Change to your domain in production
+      rpId: "car-dealership-client.vercel.app", // Change to your domain in production
       userVerification: "required",
       allowCredentials: Array.from(passkeys.values()).map(pk => ({
         id: pk.credentialId,
