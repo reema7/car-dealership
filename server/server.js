@@ -11,15 +11,10 @@ const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 // Middleware
+// In server/server.js, replace CORS with:
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'https://car-dealership-client.vercel.app/',
-    'https://car-dealership-client-r6d3z1846-reemas-projects-55d93993.vercel.app',
-    'https://car-dealership-client-reemas-projects-55d93993.vercel.app', // Also add the production URL
-    process.env.FRONTEND_URL
-  ],
-  credentials: true
+  origin: '*', // Allows all origins - for testing only!
+  credentials: false // Must be false when using wildcard
 }));
 app.use(express.json());
 app.use(express.static('public'));
