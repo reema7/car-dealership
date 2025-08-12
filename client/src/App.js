@@ -21,8 +21,22 @@ const useAuth = () => {
   return context;
 };
 
-// API Base URL (change to your server URL)
-const API_BASE = 'https://car-dealership-xmlx.vercel.app/api';
+// API Base URL - Dynamic detection
+const getApiBase = () => {
+  // Check if we're in development (localhost)
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return 'http://localhost:3001/api';
+  }
+  
+  // Production - use the deployed server
+  return 'https://car-dealership-xmlx.vercel.app/api';
+};
+
+const API_BASE = getApiBase();
+
+// Log the API base for debugging
+console.log('API Base URL:', API_BASE);
+console.log('Current hostname:', window.location.hostname);
 
 // Utility functions for WebAuthn
 const base64urlToBuffer = (base64url) => {
@@ -54,14 +68,19 @@ const api = {
       config.body = JSON.stringify(config.body);
     }
 
-    const response = await fetch(`${API_BASE}${endpoint}`, config);
-    const data = await response.json();
+    try {
+      const response = await fetch(`${API_BASE}${endpoint}`, config);
+      const data = await response.json();
 
-    if (!response.ok) {
-      throw new Error(data.error || 'API request failed');
+      if (!response.ok) {
+        throw new Error(data.error || 'API request failed');
+      }
+
+      return data;
+    } catch (error) {
+      console.error('API call failed:', { endpoint, error: error.message });
+      throw error;
     }
-
-    return data;
   },
 
   // Auth
@@ -70,10 +89,23 @@ const api = {
 
   // Passkeys
   passkeyRegisterBegin: () => api.call('/passkey/register/begin', { method: 'POST' }),
-  passkeyRegisterFinish: (credential) => api.call('/passkey/register/finish', { method: 'POST', body: { credential } }),
+  passkeyRegisterFinish: (credential, sessionId) => api.call('/passkey/register/finish', { 
+    method: 'POST', 
+    body: { credential, sessionId } 
+  }),
   passkeyAuthBegin: () => api.call('/passkey/authenticate/begin', { method: 'POST' }),
-  passkeyAuthFinish: (credential) => api.call('/passkey/authenticate/finish', { method: 'POST', body: { credential } }),
-  verifyHighValueAuth: (credential) => api.call('/passkey/verify-high-value', { method: 'POST', body: { credential } }),
+  passkeyAuthFinish: (credential, sessionId) => api.call('/passkey/authenticate/finish', { 
+    method: 'POST', 
+    body: { credential, sessionId } 
+  }),
+  verifyHighValueAuthBegin: (amount) => api.call('/passkey/verify-high-value/begin', { 
+    method: 'POST', 
+    body: { amount } 
+  }),
+  verifyHighValueAuth: (credential, sessionId) => api.call('/passkey/verify-high-value', { 
+    method: 'POST', 
+    body: { credential, sessionId } 
+  }),
 
   // Cars and Cart
   getCars: () => api.call('/cars'),
@@ -134,7 +166,7 @@ const useAIDetection = () => {
                                    window.__fxdriver_unwrapped),
 
         // Screen and hardware checks that might indicate VM
-        suspiciousScreen: window.screen.width === 1024 && window.screen.height === 768, // Common VM resolution
+        suspiciousScreen: window.screen.width === 1024 && window.screen.height === 768,
         lowHardware: detection.hardwareConcurrency <= 2,
         noDeviceMemory: detection.deviceMemory === undefined,
         noTouch: detection.maxTouchPoints === 0 && /Mobile|Android|iPhone/i.test(detection.userAgent),
@@ -143,57 +175,23 @@ const useAIDetection = () => {
         limitedLanguages: detection.languages.length <= 1,
 
         // Mouse movement patterns (basic check)
-        noMouseActivity: true // Will be updated by mouse listener
-      };
-
-      // Check for common AI/automation IPs (you can expand this list)
-      const checkIP = async () => {
-        try {
-          const response = await fetch('https://api.ipify.org?format=json');
-          const data = await response.json();
-          const ip = data.ip;
-          
-          // Known cloud/automation service IP ranges (simplified)
-          const automationIPRanges = [
-            /^34\./, // Google Cloud
-            /^35\./, // Google Cloud
-            /^52\./, // AWS
-            /^54\./, // AWS
-            /^18\./, // AWS
-            /^3\./, // AWS
-            /^13\./, // Azure
-            /^40\./, // Azure
-            /^104\./, // Azure
-            /^178\.128\./, // DigitalOcean
-            /^167\.99\./, // DigitalOcean
-          ];
-          
-          indicators.suspiciousIP = automationIPRanges.some(range => range.test(ip));
-          detection.ipAddress = ip;
-          
-          // Update detection
-          updateDetection();
-        } catch (error) {
-          console.log('Could not fetch IP for AI detection');
-        }
+        noMouseActivity: true
       };
 
       const updateDetection = () => {
         const positiveIndicators = Object.values(indicators).filter(Boolean).length;
-        const isLikelyAI = positiveIndicators >= 2; // Threshold for AI detection
+        const isLikelyAI = positiveIndicators >= 2;
         
         setIsAI(isLikelyAI);
         setDetectionDetails({ ...detection, indicators, score: positiveIndicators });
         
-        // Add debugging info
         console.log('🔍 AI Detection Status:', {
-          isLikelyAI: positiveIndicators >= 2,
+          isLikelyAI,
           score: positiveIndicators,
           indicators: Object.entries(indicators).filter(([k, v]) => v === true),
           userAgent: detection.userAgent
         });
         
-        // Log detection for debugging
         if (isLikelyAI) {
           console.log('🤖 AI/Automation detected:', { 
             score: positiveIndicators, 
@@ -220,9 +218,6 @@ const useAIDetection = () => {
         document.removeEventListener('mousemove', mouseHandler);
       }, 10000);
 
-      // Check IP
-      checkIP();
-      
       // Initial detection update
       updateDetection();
       
@@ -302,25 +297,46 @@ const AuthProvider = ({ children }) => {
     const userData = localStorage.getItem('user');
     
     if (token && userData) {
-      setUser(JSON.parse(userData));
+      try {
+        setUser(JSON.parse(userData));
+      } catch (error) {
+        console.error('Failed to parse user data:', error);
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+      }
     }
     setLoading(false);
   }, []);
 
   const login = async (credentials) => {
-    const response = await api.login(credentials);
-    localStorage.setItem('token', response.token);
-    localStorage.setItem('user', JSON.stringify(response.user));
-    setUser(response.user);
-    return response;
+    try {
+      console.log('Attempting login for:', credentials.email);
+      const response = await api.login(credentials);
+      console.log('Login successful:', response);
+      localStorage.setItem('token', response.token);
+      localStorage.setItem('user', JSON.stringify(response.user));
+      setUser(response.user);
+      return response;
+    } catch (error) {
+      console.error('Login failed:', error);
+      console.error('Login credentials used:', { email: credentials.email, passwordLength: credentials.password?.length });
+      throw error;
+    }
   };
 
   const register = async (userData) => {
-    const response = await api.register(userData);
-    localStorage.setItem('token', response.token);
-    localStorage.setItem('user', JSON.stringify(response.user));
-    setUser(response.user);
-    return response;
+    try {
+      console.log('Attempting registration for:', userData.email);
+      const response = await api.register(userData);
+      console.log('Registration successful:', response);
+      localStorage.setItem('token', response.token);
+      localStorage.setItem('user', JSON.stringify(response.user));
+      setUser(response.user);
+      return response;
+    } catch (error) {
+      console.error('Registration failed:', error);
+      throw error;
+    }
   };
 
   const logout = () => {
@@ -362,7 +378,7 @@ const AuthProvider = ({ children }) => {
       };
 
       // Verify with server
-      const response = await api.passkeyAuthFinish(credentialForServer);
+      const response = await api.passkeyAuthFinish(credentialForServer, options.sessionId);
       
       localStorage.setItem('token', response.token);
       localStorage.setItem('user', JSON.stringify(response.user));
@@ -396,6 +412,11 @@ const LoginForm = ({ onClose, onSwitchToRegister }) => {
   const { login, loginWithPasskey } = useAuth();
 
   const handleSubmit = async () => {
+    if (!formData.email || !formData.password) {
+      setError('Please fill in all fields');
+      return;
+    }
+
     setLoading(true);
     setError('');
 
@@ -508,6 +529,11 @@ const RegisterForm = ({ onClose, onSwitchToLogin }) => {
 
   const handleSubmit = async () => {
     setError('');
+
+    if (!formData.name || !formData.email || !formData.password || !formData.confirmPassword) {
+      setError('Please fill in all fields');
+      return;
+    }
 
     if (formData.password !== formData.confirmPassword) {
       setError('Passwords do not match');
@@ -623,13 +649,14 @@ const PasskeySetup = () => {
         setUserProfile(profile);
       } catch (error) {
         console.error('Could not load user profile:', error);
+        setError('Could not load profile. Please try refreshing.');
       } finally {
         setProfileLoading(false);
       }
     };
 
     checkUserPasskeys();
-  }, [success]); // Reload when passkey is successfully created
+  }, [success]);
 
   const setupPasskey = async () => {
     setLoading(true);
@@ -667,7 +694,7 @@ const PasskeySetup = () => {
       };
 
       // Send to server
-      await api.passkeyRegisterFinish(credentialForServer);
+      await api.passkeyRegisterFinish(credentialForServer, options.sessionId);
       setSuccess(true);
     } catch (err) {
       console.error('Passkey setup failed:', err);
@@ -698,7 +725,7 @@ const PasskeySetup = () => {
         
         <p className="text-green-700 mb-4">
           Your account is secured with {userProfile.passkeys.length} passkey{userProfile.passkeys.length > 1 ? 's' : ''}. 
-          You can use biometric authentication for secure login.
+          You can use biometric authentication for secure login and high-value purchases over $50,000.
         </p>
 
         <div className="space-y-2">
@@ -720,7 +747,8 @@ const PasskeySetup = () => {
       </h3>
       
       <p className="text-gray-600 mb-4">
-        Secure your account with a passkey for quick and safe login without passwords.
+        Secure your account with a passkey for quick and safe login without passwords. 
+        Required for all high-value purchases over $50,000.
       </p>
 
       {error && (
@@ -789,6 +817,7 @@ const CarCard = ({ car, onAddToCart, inCart }) => {
 const Cart = ({ onClose }) => {
   const [cartItems, setCartItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     loadCart();
@@ -796,10 +825,12 @@ const Cart = ({ onClose }) => {
 
   const loadCart = async () => {
     try {
+      setError('');
       const items = await api.getCart();
       setCartItems(items);
     } catch (error) {
       console.error('Failed to load cart:', error);
+      setError('Failed to load cart. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -811,13 +842,18 @@ const Cart = ({ onClose }) => {
       setCartItems(cartItems.filter(car => car.id !== carId));
     } catch (error) {
       console.error('Failed to remove from cart:', error);
+      setError('Failed to remove item from cart.');
     }
   };
 
   const total = cartItems.reduce((sum, car) => sum + car.price, 0);
 
   if (loading) {
-    return <div className="text-center py-8">Loading cart...</div>;
+    return (
+      <div className="bg-white p-6 rounded-lg shadow-lg max-w-2xl w-full">
+        <div className="text-center py-8">Loading cart...</div>
+      </div>
+    );
   }
 
   return (
@@ -828,6 +864,12 @@ const Cart = ({ onClose }) => {
           <X size={24} />
         </button>
       </div>
+
+      {error && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+          {error}
+        </div>
+      )}
 
       {cartItems.length === 0 ? (
         <p className="text-gray-500 text-center py-8">Your cart is empty</p>
@@ -876,14 +918,6 @@ const Cart = ({ onClose }) => {
 // Checkout Form Component
 const CheckoutForm = ({ cartItems, total, onSuccess }) => {
   const [formData, setFormData] = useState({
-    firstName: '',
-    lastName: '',
-    email: '',
-    phone: '',
-    address: '',
-    city: '',
-    state: '',
-    zipCode: '',
     cardNumber: '',
     expiryDate: '',
     cvv: '',
@@ -894,13 +928,13 @@ const CheckoutForm = ({ cartItems, total, onSuccess }) => {
   const { isAuthenticated } = useAuth();
   const { isAI } = useAIDetection();
 
-  // Only require passkey auth if AI is detected AND purchase is over $50k AND user is authenticated
-  const requiresPasskeyAuth = isAI && total > 50000 && isAuthenticated;
+  // Always require passkey auth for purchases over $50,000
+  const isHighValue = total > 50000;
 
   const performHighValuePasskeyAuth = async () => {
     try {
       // Get authentication options for high-value transaction
-      const options = await api.passkeyAuthBegin();
+      const options = await api.verifyHighValueAuthBegin(total);
       
       // Add txAuthSimple extension for high-value purchases
       const publicKeyCredentialRequestOptions = {
@@ -910,9 +944,7 @@ const CheckoutForm = ({ cartItems, total, onSuccess }) => {
           ...cred,
           id: base64urlToBuffer(cred.id)
         })),
-        extensions: {
-          txAuthSimple: `AI Agent is about to make a purchase of over $${total.toLocaleString()}. Do you want to allow this?`
-        }
+        extensions: options.extensions || {}
       };
 
       // Get credential from authenticator with transaction auth
@@ -935,22 +967,31 @@ const CheckoutForm = ({ cartItems, total, onSuccess }) => {
       };
 
       // Verify high-value transaction authentication
-      await api.verifyHighValueAuth(credentialForServer);
+      await api.verifyHighValueAuth(credentialForServer, options.sessionId);
       
       return true;
     } catch (error) {
       console.error('High-value passkey authentication failed:', error);
-      throw new Error('AI transaction authentication failed. Purchase cancelled for security.');
+      throw new Error('High-value transaction authentication failed. Purchase cancelled for security.');
     }
   };
 
   const handleSubmit = async () => {
+    // Validate form
+    const requiredFields = ['cardNumber', 'expiryDate', 'cvv', 'cardholderName'];
+    const missingFields = requiredFields.filter(field => !formData[field]);
+    
+    if (missingFields.length > 0) {
+      setError('Please fill in all payment fields');
+      return;
+    }
+
     setLoading(true);
     setError('');
 
     try {
-      // Only perform passkey auth if it's actually required (AI + high value)
-      if (requiresPasskeyAuth) {
+      // ALWAYS perform passkey auth for high-value transactions (both AI and human)
+      if (isHighValue && isAuthenticated) {
         try {
           await performHighValuePasskeyAuth();
         } catch (authError) {
@@ -963,14 +1004,10 @@ const CheckoutForm = ({ cartItems, total, onSuccess }) => {
       const orderData = {
         carIds: cartItems.map(car => car.id),
         customerInfo: {
-          firstName: formData.firstName,
-          lastName: formData.lastName,
-          email: formData.email,
-          phone: formData.phone,
-          address: formData.address,
-          city: formData.city,
-          state: formData.state,
-          zipCode: formData.zipCode
+          // Use authenticated user info or default values
+          firstName: 'Customer',
+          lastName: 'Purchase',
+          email: 'customer@example.com'
         },
         paymentInfo: {
           cardNumber: formData.cardNumber,
@@ -978,7 +1015,7 @@ const CheckoutForm = ({ cartItems, total, onSuccess }) => {
           cvv: formData.cvv,
           cardholderName: formData.cardholderName
         },
-        requiresHighValueAuth: requiresPasskeyAuth,
+        requiresHighValueAuth: isHighValue && isAuthenticated,
         isAITransaction: isAI
       };
 
@@ -992,14 +1029,6 @@ const CheckoutForm = ({ cartItems, total, onSuccess }) => {
     }
   };
 
-  console.log('Checkout Debug:', { 
-    isAI, 
-    total, 
-    isAuthenticated, 
-    requiresPasskeyAuth,
-    totalOver50k: total > 50000 
-  });
-
   return (
     <div className="space-y-4">
       {error && (
@@ -1008,115 +1037,105 @@ const CheckoutForm = ({ cartItems, total, onSuccess }) => {
         </div>
       )}
 
-      {/* Only show AI warning if AI is detected AND high value */}
-      {requiresPasskeyAuth && (
-        <div className="bg-red-100 border border-red-400 text-red-800 px-4 py-3 rounded mb-4">
+      {/* High-value transaction warning - for ALL users */}
+      {isHighValue && (
+        <div className="bg-amber-100 border border-amber-400 text-amber-800 px-4 py-3 rounded mb-4">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Bot size={16} />
-            <strong>AI High-Value Transaction Security</strong>
+            <Key size={16} />
+            <strong>High-Value Transaction Security</strong>
           </div>
           <p className="text-sm mt-1">
-            AI detected making a purchase over $50,000. Additional passkey authentication required for security.
+            {isAuthenticated 
+              ? "This purchase over $50,000 requires passkey authentication for security."
+              : "High-value purchases over $50,000 require account login and passkey setup for security."
+            }
           </p>
         </div>
       )}
 
-      {/* Show human high-value message only if NOT AI but high value */}
-      {total > 50000 && !isAI && (
+      {/* AI detection info */}
+      {isAI && (
         <div className="bg-blue-100 border border-blue-400 text-blue-800 px-4 py-3 rounded mb-4">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <CreditCard size={16} />
-            <strong>High-Value Transaction</strong>
+            <Bot size={16} />
+            <strong>AI Agent Detected</strong>
           </div>
           <p className="text-sm mt-1">
-            Large purchase detected ($50,000+). No additional authentication required for human users.
+            Automated agent purchasing detected. Enhanced security measures are active.
           </p>
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">First Name</label>
-          <input
-            type="text"
-            required
-            value={formData.firstName}
-            onChange={(e) => setFormData({ ...formData, firstName: e.target.value })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Last Name</label>
-          <input
-            type="text"
-            required
-            value={formData.lastName}
-            onChange={(e) => setFormData({ ...formData, lastName: e.target.value })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-      </div>
+      <div className="bg-gray-50 p-4 rounded-lg mb-6">
+        <h4 className="text-lg font-semibold mb-4 flex items-center gap-2">
+          <CreditCard size={20} />
+          Payment Information
+        </h4>
+        
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Cardholder Name *</label>
+            <input
+              type="text"
+              required
+              placeholder="John Doe"
+              value={formData.cardholderName}
+              onChange={(e) => setFormData({ ...formData, cardholderName: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
 
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-        <input
-          type="email"
-          required
-          value={formData.email}
-          onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-      </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Card Number *</label>
+            <input
+              type="text"
+              required
+              placeholder="1234 5678 9012 3456"
+              value={formData.cardNumber}
+              onChange={(e) => setFormData({ ...formData, cardNumber: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
 
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Card Number</label>
-        <input
-          type="text"
-          required
-          placeholder="1234 5678 9012 3456"
-          value={formData.cardNumber}
-          onChange={(e) => setFormData({ ...formData, cardNumber: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Expiry Date</label>
-          <input
-            type="text"
-            required
-            placeholder="MM/YY"
-            value={formData.expiryDate}
-            onChange={(e) => setFormData({ ...formData, expiryDate: e.target.value })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">CVV</label>
-          <input
-            type="text"
-            required
-            placeholder="123"
-            value={formData.cvv}
-            onChange={(e) => setFormData({ ...formData, cvv: e.target.value })}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Expiry Date *</label>
+              <input
+                type="text"
+                required
+                placeholder="MM/YY"
+                value={formData.expiryDate}
+                onChange={(e) => setFormData({ ...formData, expiryDate: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">CVV *</label>
+              <input
+                type="text"
+                required
+                placeholder="123"
+                value={formData.cvv}
+                onChange={(e) => setFormData({ ...formData, cvv: e.target.value })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
         </div>
       </div>
 
       <button
         onClick={handleSubmit}
-        disabled={loading}
+        disabled={loading || (isHighValue && !isAuthenticated)}
         style={{
           width: '100%',
-          backgroundColor: requiresPasskeyAuth ? '#dc2626' : (total > 50000 ? '#d97706' : '#16a34a'),
+          backgroundColor: isHighValue ? '#dc2626' : '#16a34a',
           color: 'white',
           padding: '12px',
           borderRadius: '6px',
           border: 'none',
-          cursor: loading ? 'not-allowed' : 'pointer',
-          opacity: loading ? 0.5 : 1,
+          cursor: loading || (isHighValue && !isAuthenticated) ? 'not-allowed' : 'pointer',
+          opacity: loading || (isHighValue && !isAuthenticated) ? 0.5 : 1,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -1125,18 +1144,24 @@ const CheckoutForm = ({ cartItems, total, onSuccess }) => {
           fontWeight: '500'
         }}
       >
-        {requiresPasskeyAuth ? <Bot size={16} /> : (total > 50000 ? <Key size={16} /> : <CreditCard size={16} />)}
+        {isHighValue ? <Key size={16} /> : <CreditCard size={16} />}
         {loading 
-          ? (requiresPasskeyAuth ? 'AI Auth Required...' : 'Processing...') 
-          : (requiresPasskeyAuth 
-              ? `AI Security Check - $${total.toLocaleString()}` 
-              : (total > 50000 && !isAI
-                  ? `High-Value Purchase - $${total.toLocaleString()} (No Auth Required)`
-                  : `Complete Purchase - $${total.toLocaleString()}`
+          ? 'Processing...'
+          : (isHighValue && !isAuthenticated
+              ? `Login Required - ${total.toLocaleString()}`
+              : (isHighValue 
+                  ? `Secure Purchase - ${total.toLocaleString()}`
+                  : `Complete Purchase - ${total.toLocaleString()}`
                 )
             )
         }
       </button>
+
+      {isHighValue && !isAuthenticated && (
+        <p className="text-sm text-red-600 text-center mt-2">
+          Please register or log in to complete high-value purchases over $50,000
+        </p>
+      )}
     </div>
   );
 };
@@ -1149,6 +1174,7 @@ const CarDealershipApp = () => {
   const [showRegister, setShowRegister] = useState(false);
   const [showCart, setShowCart] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const { user, logout, isAuthenticated } = useAuth();
   const { isAI, detectionDetails } = useAIDetection();
 
@@ -1161,10 +1187,12 @@ const CarDealershipApp = () => {
 
   const loadCars = async () => {
     try {
+      setError('');
       const carList = await api.getCars();
       setCars(carList);
     } catch (error) {
       console.error('Failed to load cars:', error);
+      setError('Failed to load cars. Please refresh the page.');
     } finally {
       setLoading(false);
     }
@@ -1191,6 +1219,7 @@ const CarDealershipApp = () => {
       loadCart();
     } catch (error) {
       console.error('Failed to add to cart:', error);
+      alert('Failed to add item to cart. Please try again.');
     }
   };
 
@@ -1311,6 +1340,13 @@ const CarDealershipApp = () => {
             Browse our extensive collection of quality vehicles
           </p>
         </div>
+
+        {/* Error Display */}
+        {error && (
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
+            {error}
+          </div>
+        )}
 
         {/* Passkey Setup for Authenticated Users */}
         {isAuthenticated && (

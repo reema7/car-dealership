@@ -10,11 +10,35 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
+// Dynamic domain configuration
+const isDevelopment = process.env.NODE_ENV !== 'production';
+const DOMAIN = isDevelopment ? 'localhost' : 'car-dealership-client.vercel.app';
+const CLIENT_ORIGINS = [
+  'http://localhost:3000',
+  'http://localhost:3001', 
+  'https://car-dealership-client.vercel.app',
+  'https://car-dealership-xmlx.vercel.app'
+];
+
 // Middleware
-// In server/server.js, replace CORS with:
 app.use(cors({
-  origin: '*', // Allows all origins - for testing only!
-  credentials: false // Must be false when using wildcard
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, etc.)
+    if (!origin) return callback(null, true);
+    
+    // Allow all origins in development
+    if (isDevelopment) return callback(null, true);
+    
+    // Check against allowed origins in production
+    if (CLIENT_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // Log and allow for debugging
+    console.log('CORS blocked origin:', origin);
+    return callback(null, true); // Allow for now, can be restricted later
+  },
+  credentials: true
 }));
 app.use(express.json());
 app.use(express.static('public'));
@@ -82,10 +106,12 @@ const detectAI = (req, res, next) => {
 app.use(detectAI);
 
 // In-memory storage (use a real database in production)
-const users = new Map();
+const users = new Map(); // Key: user.id (not email!)
+const usersByEmail = new Map(); // Key: email, Value: user.id
 const cars = new Map();
 const orders = new Map();
 const passkeys = new Map(); // Store passkey credentials
+const authChallenges = new Map(); // Store temporary challenges by session ID
 
 // Initialize sample car data
 const initializeCars = () => {
@@ -157,11 +183,20 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ error: 'Access token required' });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
+      console.log('JWT verification failed:', err.message);
       return res.status(403).json({ error: 'Invalid token' });
     }
-    req.user = user;
+    
+    // Verify user still exists
+    const user = users.get(decoded.id);
+    if (!user) {
+      console.log('User not found for token:', decoded.id);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    req.user = decoded;
     next();
   });
 };
@@ -173,7 +208,10 @@ app.post('/api/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
 
-    if (users.has(email)) {
+    console.log('Registration attempt for email:', email);
+
+    if (usersByEmail.has(email)) {
+      console.log('User already exists for email:', email);
       return res.status(400).json({ error: 'User already exists' });
     }
 
@@ -186,10 +224,17 @@ app.post('/api/register', async (req, res) => {
       password: hashedPassword,
       name,
       cart: [],
+      passkeys: [],
       createdAt: new Date().toISOString()
     };
 
-    users.set(email, user);
+    // Store user by both ID and email mapping
+    users.set(userId, user);
+    usersByEmail.set(email, userId);
+
+    console.log('User registered successfully:', { id: userId, email, name });
+    console.log('Total users now:', users.size);
+    console.log('Email mappings:', Array.from(usersByEmail.entries()));
 
     const token = jwt.sign({ id: userId, email }, JWT_SECRET, { expiresIn: '24h' });
 
@@ -199,6 +244,7 @@ app.post('/api/register', async (req, res) => {
       user: { id: userId, email, name }
     });
   } catch (error) {
+    console.error('Registration error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -208,17 +254,34 @@ app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = users.get(email);
+    console.log('Login attempt for email:', email);
+
+    const userId = usersByEmail.get(email);
+    console.log('Found userId for email:', userId);
+    
+    if (!userId) {
+      console.log('No userId found for email:', email);
+      return res.status(400).json({ error: 'Invalid credentials' });
+    }
+
+    const user = users.get(userId);
+    console.log('Found user for userId:', userId, user ? 'exists' : 'not found');
+    
     if (!user) {
+      console.log('User object not found for userId:', userId);
       return res.status(400).json({ error: 'Invalid credentials' });
     }
 
     const validPassword = await bcrypt.compare(password, user.password);
+    console.log('Password validation result:', validPassword);
+    
     if (!validPassword) {
       return res.status(400).json({ error: 'Invalid credentials' });
     }
 
     const token = jwt.sign({ id: user.id, email }, JWT_SECRET, { expiresIn: '24h' });
+
+    console.log('User logged in successfully:', { id: user.id, email });
 
     res.json({
       message: 'Login successful',
@@ -226,6 +289,7 @@ app.post('/api/login', async (req, res) => {
       user: { id: user.id, email, name: user.name }
     });
   } catch (error) {
+    console.error('Login error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -233,18 +297,19 @@ app.post('/api/login', async (req, res) => {
 // Passkey registration - Generate options
 app.post('/api/passkey/register/begin', authenticateToken, (req, res) => {
   try {
-    const user = Array.from(users.values()).find(u => u.id === req.user.id);
+    const user = users.get(req.user.id);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     const challenge = generateChallenge();
+    const sessionId = uuidv4();
     const userId = Buffer.from(user.id).toString('base64url');
 
     const options = {
       rp: {
         name: "AutoDealer Pro",
-        id: "car-dealership-client.vercel.app" // Change to your domain in production
+        id: DOMAIN
       },
       user: {
         id: userId,
@@ -265,11 +330,25 @@ app.post('/api/passkey/register/begin', authenticateToken, (req, res) => {
       }
     };
 
-    // Store challenge temporarily (use Redis or similar in production)
-    user.currentChallenge = challenge;
+    // Store challenge with session ID
+    authChallenges.set(sessionId, {
+      challenge,
+      userId: user.id,
+      type: 'registration',
+      created: Date.now()
+    });
 
-    res.json(options);
+    // Clean up old challenges (older than 5 minutes)
+    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+    for (const [key, value] of authChallenges.entries()) {
+      if (value.created < fiveMinutesAgo) {
+        authChallenges.delete(key);
+      }
+    }
+
+    res.json({ ...options, sessionId });
   } catch (error) {
+    console.error('Passkey registration begin error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -277,11 +356,20 @@ app.post('/api/passkey/register/begin', authenticateToken, (req, res) => {
 // Passkey registration - Verify credential
 app.post('/api/passkey/register/finish', authenticateToken, (req, res) => {
   try {
-    const { credential } = req.body;
-    const user = Array.from(users.values()).find(u => u.id === req.user.id);
+    const { credential, sessionId } = req.body;
     
-    if (!user || !user.currentChallenge) {
+    if (!sessionId || !authChallenges.has(sessionId)) {
       return res.status(400).json({ error: 'Invalid registration session' });
+    }
+
+    const challengeData = authChallenges.get(sessionId);
+    if (challengeData.userId !== req.user.id || challengeData.type !== 'registration') {
+      return res.status(400).json({ error: 'Invalid registration session' });
+    }
+
+    const user = users.get(req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
     }
 
     // Store the passkey credential
@@ -298,16 +386,19 @@ app.post('/api/passkey/register/finish', authenticateToken, (req, res) => {
     passkeys.set(credential.id, passkey);
     
     // Add passkey reference to user
-    if (!user.passkeys) user.passkeys = [];
     user.passkeys.push(passkeyId);
 
-    delete user.currentChallenge;
+    // Clean up challenge
+    authChallenges.delete(sessionId);
+
+    console.log('Passkey registered for user:', user.id);
 
     res.json({
       message: 'Passkey registered successfully',
       passkeyId: passkeyId
     });
   } catch (error) {
+    console.error('Passkey registration finish error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -316,11 +407,12 @@ app.post('/api/passkey/register/finish', authenticateToken, (req, res) => {
 app.post('/api/passkey/authenticate/begin', (req, res) => {
   try {
     const challenge = generateChallenge();
+    const sessionId = uuidv4();
 
     const options = {
       challenge: challenge,
       timeout: 60000,
-      rpId: "car-dealership-client.vercel.app", // Change to your domain in production
+      rpId: DOMAIN,
       userVerification: "required",
       allowCredentials: Array.from(passkeys.values()).map(pk => ({
         id: pk.credentialId,
@@ -329,11 +421,16 @@ app.post('/api/passkey/authenticate/begin', (req, res) => {
       }))
     };
 
-    // Store challenge temporarily
-    global.currentAuthChallenge = challenge;
+    // Store challenge with session ID
+    authChallenges.set(sessionId, {
+      challenge,
+      type: 'authentication',
+      created: Date.now()
+    });
 
-    res.json(options);
+    res.json({ ...options, sessionId });
   } catch (error) {
+    console.error('Passkey auth begin error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -341,9 +438,14 @@ app.post('/api/passkey/authenticate/begin', (req, res) => {
 // Passkey authentication - Verify assertion
 app.post('/api/passkey/authenticate/finish', (req, res) => {
   try {
-    const { credential } = req.body;
+    const { credential, sessionId } = req.body;
     
-    if (!global.currentAuthChallenge) {
+    if (!sessionId || !authChallenges.has(sessionId)) {
+      return res.status(400).json({ error: 'Invalid authentication session' });
+    }
+
+    const challengeData = authChallenges.get(sessionId);
+    if (challengeData.type !== 'authentication') {
       return res.status(400).json({ error: 'Invalid authentication session' });
     }
 
@@ -364,14 +466,17 @@ app.post('/api/passkey/authenticate/finish', (req, res) => {
       return res.status(400).json({ error: 'Invalid passkey assertion' });
     }
 
-    const user = Array.from(users.values()).find(u => u.id === passkey.userId);
+    const user = users.get(passkey.userId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
 
-    delete global.currentAuthChallenge;
+    // Clean up challenge
+    authChallenges.delete(sessionId);
+
+    console.log('Passkey authentication successful for user:', user.id);
 
     res.json({
       message: 'Passkey authentication successful',
@@ -379,6 +484,7 @@ app.post('/api/passkey/authenticate/finish', (req, res) => {
       user: { id: user.id, email: user.email, name: user.name }
     });
   } catch (error) {
+    console.error('Passkey auth finish error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -386,10 +492,15 @@ app.post('/api/passkey/authenticate/finish', (req, res) => {
 // High-value transaction passkey verification
 app.post('/api/passkey/verify-high-value', authenticateToken, (req, res) => {
   try {
-    const { credential } = req.body;
+    const { credential, sessionId } = req.body;
     
-    if (!global.currentAuthChallenge) {
+    if (!sessionId || !authChallenges.has(sessionId)) {
       return res.status(400).json({ error: 'Invalid authentication session' });
+    }
+
+    const challengeData = authChallenges.get(sessionId);
+    if (challengeData.type !== 'high-value') {
+      return res.status(400).json({ error: 'Invalid high-value authentication session' });
     }
 
     const passkey = passkeys.get(credential.id);
@@ -421,20 +532,22 @@ app.post('/api/passkey/verify-high-value', authenticateToken, (req, res) => {
       
       if (extensionsPresent) {
         console.log('✅ txAuthSimple extension detected in high-value transaction');
-        // In a production implementation, you would parse the CBOR extension data here
       }
     } catch (parseError) {
       console.log('Could not parse extension data:', parseError.message);
     }
 
     // Store successful high-value auth for this user session
-    const user = Array.from(users.values()).find(u => u.id === req.user.id);
+    const user = users.get(req.user.id);
     if (user) {
       user.highValueAuthTimestamp = Date.now();
       user.highValueAuthValid = true;
     }
 
-    delete global.currentAuthChallenge;
+    // Clean up challenge
+    authChallenges.delete(sessionId);
+
+    console.log('High-value transaction authenticated for user:', req.user.id);
 
     res.json({
       message: 'High-value transaction authentication successful',
@@ -447,15 +560,61 @@ app.post('/api/passkey/verify-high-value', authenticateToken, (req, res) => {
   }
 });
 
+// Add high-value auth begin endpoint
+app.post('/api/passkey/verify-high-value/begin', authenticateToken, (req, res) => {
+  try {
+    const { amount } = req.body;
+    const user = users.get(req.user.id);
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const challenge = generateChallenge();
+    const sessionId = uuidv4();
+
+    const options = {
+      challenge: challenge,
+      timeout: 60000,
+      rpId: DOMAIN,
+      userVerification: "required",
+      allowCredentials: user.passkeys.map(passkeyId => {
+        const passkey = Array.from(passkeys.values()).find(pk => pk.id === passkeyId);
+        return passkey ? {
+          id: passkey.credentialId,
+          type: "public-key",
+          transports: ["internal", "hybrid"]
+        } : null;
+      }).filter(Boolean),
+      extensions: {
+        txAuthSimple: `Authorize purchase of $${amount?.toLocaleString() || 'unknown amount'}`
+      }
+    };
+
+    // Store challenge with session ID
+    authChallenges.set(sessionId, {
+      challenge,
+      userId: user.id,
+      type: 'high-value',
+      amount,
+      created: Date.now()
+    });
+
+    res.json({ ...options, sessionId });
+  } catch (error) {
+    console.error('High-value auth begin error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Add this route to handle favicon requests
 app.get('/favicon.ico', (req, res) => {
-  res.status(204).end(); // No content response
+  res.status(204).end();
 });
 
 app.get('/favicon.png', (req, res) => {
-  res.status(204).end(); // No content response
+  res.status(204).end();
 });
-
 
 // Get all cars
 app.get('/api/cars', (req, res) => {
@@ -511,7 +670,7 @@ app.get('/api/cars/:id', (req, res) => {
 app.post('/api/cart/add', authenticateToken, (req, res) => {
   try {
     const { carId } = req.body;
-    const user = Array.from(users.values()).find(u => u.id === req.user.id);
+    const user = users.get(req.user.id);
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -526,8 +685,11 @@ app.post('/api/cart/add', authenticateToken, (req, res) => {
       user.cart.push(carId);
     }
 
+    console.log('Added to cart for user:', user.id, 'Car:', carId);
+
     res.json({ message: 'Car added to cart', cart: user.cart });
   } catch (error) {
+    console.error('Add to cart error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -535,15 +697,19 @@ app.post('/api/cart/add', authenticateToken, (req, res) => {
 // Get cart
 app.get('/api/cart', authenticateToken, (req, res) => {
   try {
-    const user = Array.from(users.values()).find(u => u.id === req.user.id);
+    const user = users.get(req.user.id);
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     const cartCars = user.cart.map(carId => cars.get(carId)).filter(Boolean);
+    
+    console.log('Cart retrieved for user:', user.id, 'Items:', cartCars.length);
+    
     res.json(cartCars);
   } catch (error) {
+    console.error('Get cart error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -551,15 +717,19 @@ app.get('/api/cart', authenticateToken, (req, res) => {
 // Remove from cart
 app.delete('/api/cart/:carId', authenticateToken, (req, res) => {
   try {
-    const user = Array.from(users.values()).find(u => u.id === req.user.id);
+    const user = users.get(req.user.id);
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     user.cart = user.cart.filter(id => id !== req.params.carId);
+    
+    console.log('Removed from cart for user:', user.id, 'Car:', req.params.carId);
+    
     res.json({ message: 'Car removed from cart', cart: user.cart });
   } catch (error) {
+    console.error('Remove from cart error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -568,7 +738,7 @@ app.delete('/api/cart/:carId', authenticateToken, (req, res) => {
 app.post('/api/orders', authenticateToken, (req, res) => {
   try {
     const { carIds, customerInfo, paymentInfo, requiresHighValueAuth } = req.body;
-    const user = Array.from(users.values()).find(u => u.id === req.user.id);
+    const user = users.get(req.user.id);
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -577,17 +747,20 @@ app.post('/api/orders', authenticateToken, (req, res) => {
     const orderCars = carIds.map(id => cars.get(id)).filter(Boolean);
     const total = orderCars.reduce((sum, car) => sum + car.price, 0);
 
-    // Check for high-value transaction authentication
-    if (requiresHighValueAuth && total > 50000) {
+    // ALWAYS require passkey auth for purchases over $50,000, regardless of AI detection
+    const isHighValue = total > 50000;
+    
+    if (isHighValue) {
       // Verify high-value auth was completed recently (within last 5 minutes)
       const authAge = Date.now() - (user.highValueAuthTimestamp || 0);
       const fiveMinutes = 5 * 60 * 1000;
       
       if (!user.highValueAuthValid || authAge > fiveMinutes) {
         return res.status(403).json({ 
-          error: 'High-value transaction requires recent passkey authentication',
+          error: 'High-value transaction requires passkey authentication',
           requiresAuth: true,
-          amount: total
+          amount: total,
+          isHighValue: true
         });
       }
       
@@ -605,7 +778,7 @@ app.post('/api/orders', authenticateToken, (req, res) => {
       paymentInfo: { ...paymentInfo, cardNumber: '****' + paymentInfo.cardNumber.slice(-4) },
       total,
       status: 'confirmed',
-      highValueAuth: requiresHighValueAuth && total > 50000,
+      highValueAuth: isHighValue,
       createdAt: new Date().toISOString()
     };
 
@@ -614,7 +787,7 @@ app.post('/api/orders', authenticateToken, (req, res) => {
     // Clear cart
     user.cart = [];
 
-    console.log(`✅ Order created: ${orderId}, Total: ${total}${order.highValueAuth ? ' (High-value with passkey auth)' : ''}`);
+    console.log(`✅ Order created: ${orderId}, Total: $${total.toLocaleString()}${order.highValueAuth ? ' (High-value with passkey auth)' : ''}`);
 
     res.status(201).json({
       message: 'Order created successfully',
@@ -634,23 +807,41 @@ app.get('/api/orders', authenticateToken, (req, res) => {
     const userOrders = Array.from(orders.values()).filter(order => order.userId === req.user.id);
     res.json(userOrders);
   } catch (error) {
+    console.error('Get orders error:', error);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// Debug endpoint to check storage state
+app.get('/api/debug/users', (req, res) => {
+  res.json({
+    totalUsers: users.size,
+    emailMappings: Array.from(usersByEmail.entries()),
+    users: Array.from(users.entries()).map(([id, user]) => ({
+      id,
+      email: user.email,
+      name: user.name,
+      hasPassword: !!user.password,
+      passwordLength: user.password ? user.password.length : 0,
+      cartItems: user.cart ? user.cart.length : 0,
+      passkeys: user.passkeys ? user.passkeys.length : 0
+    }))
+  });
 });
 
 // Get user profile
 app.get('/api/profile', authenticateToken, (req, res) => {
   try {
-    const user = Array.from(users.values()).find(u => u.id === req.user.id);
+    const user = users.get(req.user.id);
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const userPasskeys = user.passkeys ? user.passkeys.map(pkId => {
-      const passkey = Array.from(passkeys.values()).find(pk => pk.id === pkId);
+    const userPasskeys = user.passkeys.map(passkeyId => {
+      const passkey = Array.from(passkeys.values()).find(pk => pk.id === passkeyId);
       return passkey ? { id: passkey.id, createdAt: passkey.createdAt } : null;
-    }).filter(Boolean) : [];
+    }).filter(Boolean);
 
     res.json({
       id: user.id,
@@ -660,13 +851,31 @@ app.get('/api/profile', authenticateToken, (req, res) => {
       createdAt: user.createdAt
     });
   } catch (error) {
+    console.error('Get profile error:', error);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log('Environment:', process.env.NODE_ENV || 'development');
+  console.log('Domain:', DOMAIN);
+  console.log('Allowed origins:', CLIENT_ORIGINS);
   console.log('Sample cars loaded:', cars.size);
+  console.log('Users storage initialized');
+  
+  // Debug: Log storage state periodically
+  setInterval(() => {
+    console.log('=== STORAGE DEBUG ===');
+    console.log('Total users:', users.size);
+    console.log('Email mappings:', Array.from(usersByEmail.entries()));
+    console.log('Users data:', Array.from(users.entries()).map(([id, user]) => ({ 
+      id, 
+      email: user.email, 
+      name: user.name 
+    })));
+    console.log('===================');
+  }, 30000); // Log every 30 seconds
 });
 
 // Export for testing
