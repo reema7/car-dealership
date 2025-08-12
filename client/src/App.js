@@ -22,7 +22,7 @@ const useAuth = () => {
 };
 
 // API Base URL (change to your server URL)
-const API_BASE = 'https://car-dealership-xmlx-ps86to0co-reemas-projects-55d93993.vercel.app/';
+const API_BASE = 'https://car-dealership-xmlx-ps86to0co-reemas-projects-55d93993.vercel.app/api';
 
 // Utility functions for WebAuthn
 const base64urlToBuffer = (base64url) => {
