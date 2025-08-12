@@ -14,7 +14,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-producti
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://car-dealership-frontend.vercel.app',
+    'https://car-dealership-client.vercel.app/',
+    'https://car-dealership-client-r6d3z1846-reemas-projects-55d93993.vercel.app',
+    'https://car-dealership-client-reemas-projects-55d93993.vercel.app', // Also add the production URL
     process.env.FRONTEND_URL
   ],
   credentials: true
