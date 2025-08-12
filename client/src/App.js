@@ -22,7 +22,7 @@ const useAuth = () => {
 };
 
 // API Base URL (change to your server URL)
-const API_BASE = 'http://localhost:3001/api';
+const API_BASE = 'https://car-dealership-api.vercel.app/api';
 
 // Utility functions for WebAuthn
 const base64urlToBuffer = (base64url) => {
