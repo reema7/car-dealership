@@ -175,36 +175,28 @@ const UserStore = {
       try {
         console.log('Database: Creating user with email:', user.email);
         
-        const result = await db`
+        // Just do the INSERT without relying on RETURNING
+        await db`
           INSERT INTO users (id, email, password, name, cart, passkeys, created_at)
           VALUES (${user.id}, ${user.email}, ${user.password}, ${user.name}, 
                   ${JSON.stringify(user.cart)}, ${JSON.stringify(user.passkeys)}, NOW())
-          RETURNING id, email, name, cart, passkeys, created_at
         `;
         
-        console.log('Database INSERT result:', result);
-        console.log('Result length:', result.length);
+        console.log('Database INSERT completed successfully');
         
-        if (result && result.length > 0) {
-          const dbUser = result[0];
-          console.log('Database user created with email:', dbUser.email);
-          console.log('Stored vs original email:', { 
-            original: user.email, 
-            stored: dbUser.email,
-            match: user.email === dbUser.email
-          });
-          
-          // Return the original user object since we have all the data
-          // and the database might have formatting issues
+        // Immediately query to verify the user was created
+        const verifyResult = await db`SELECT id, email, name FROM users WHERE email = ${user.email}`;
+        
+        if (verifyResult && verifyResult.length > 0) {
+          console.log('User verification successful:', verifyResult[0].email);
+          // Return the original user object since we know it was inserted
           return {
             ...user,
-            created_at: dbUser.created_at,
-            // Ensure we keep the original email format
-            email: user.email
+            created_at: new Date().toISOString() // Add created_at timestamp
           };
         } else {
-          console.error('Database INSERT returned no results');
-          throw new Error('Failed to create user - no result returned');
+          console.error('User verification failed - user not found after insert');
+          throw new Error('Failed to create user - verification failed');
         }
         
       } catch (error) {
