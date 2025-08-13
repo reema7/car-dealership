@@ -174,32 +174,43 @@ const UserStore = {
     if (useDatabase) {
       try {
         console.log('Database: Creating user with email:', user.email);
-        console.log('Full user object being saved:', {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          cartLength: user.cart.length,
-          passkeysLength: user.passkeys.length
-        });
         
         const result = await db`
           INSERT INTO users (id, email, password, name, cart, passkeys, created_at)
           VALUES (${user.id}, ${user.email}, ${user.password}, ${user.name}, 
                   ${JSON.stringify(user.cart)}, ${JSON.stringify(user.passkeys)}, NOW())
-          RETURNING *
+          RETURNING id, email, name, cart, passkeys, created_at
         `;
         
-        console.log('Database user created with email:', result[0]?.email);
-        console.log('Stored vs original email:', { 
-          original: user.email, 
-          stored: result[0]?.email,
-          match: user.email === result[0]?.email
-        });
+        console.log('Database INSERT result:', result);
+        console.log('Result length:', result.length);
         
-        return result[0];
+        if (result && result.length > 0) {
+          const dbUser = result[0];
+          console.log('Database user created with email:', dbUser.email);
+          console.log('Stored vs original email:', { 
+            original: user.email, 
+            stored: dbUser.email,
+            match: user.email === dbUser.email
+          });
+          
+          // Return the original user object since we have all the data
+          // and the database might have formatting issues
+          return {
+            ...user,
+            created_at: dbUser.created_at,
+            // Ensure we keep the original email format
+            email: user.email
+          };
+        } else {
+          console.error('Database INSERT returned no results');
+          throw new Error('Failed to create user - no result returned');
+        }
+        
       } catch (error) {
         console.error('Database create user error:', error);
         console.error('Error details:', error.message);
+        console.error('Error code:', error.code);
         throw error;
       }
     } else {
@@ -582,6 +593,13 @@ app.post('/api/register', async (req, res) => {
         created: createdUser.email,
         match: email === createdUser.email
       });
+      
+      // Double-check by immediately trying to find the user
+      const verifyUser = await UserStore.findByEmail(email);
+      console.log('Immediate verification lookup:', verifyUser ? 'found' : 'not found');
+      if (verifyUser) {
+        console.log('Verified user email:', verifyUser.email);
+      }
     }
 
     const token = jwt.sign({ id: userId, email: email }, JWT_SECRET, { expiresIn: '24h' });
