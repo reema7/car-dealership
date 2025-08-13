@@ -551,7 +551,8 @@ const authenticateToken = async (req, res, next) => {
         if (useDatabase) {
           try {
             const allUsers = await db`SELECT email FROM users LIMIT 5`;
-            console.log('Available users in database:', Array.isArray(allUsers) ? allUsers.map(u => u.email) : 'Not an array:', allUsers);
+            const userEmails = allUsers.rows ? allUsers.rows.map(u => u.email) : [];
+            console.log('Available users in database:', userEmails);
           } catch (dbError) {
             console.log('Could not query users:', dbError.message);
           }
@@ -797,11 +798,12 @@ app.post('/api/passkey/authenticate/begin', async (req, res) => {
     const challenge = generateChallenge();
     const sessionId = uuidv4();
 
-    // Get all passkeys for the options
+    // Get all passkeys for the options - FIXED: Use result.rows
     let allowCredentials = [];
     if (useDatabase) {
-      const allPasskeys = await db`SELECT credential_id FROM passkeys`;
-      allowCredentials = allPasskeys.map(pk => ({
+      const result = await db`SELECT credential_id FROM passkeys`;
+      const passkeyRows = result.rows || []; // FIXED: Added .rows
+      allowCredentials = passkeyRows.map(pk => ({
         id: pk.credential_id,
         type: "public-key",
         transports: ["internal", "hybrid"]
@@ -902,7 +904,7 @@ app.post('/api/passkey/verify-high-value/begin', authenticateToken, async (req, 
     const challenge = generateChallenge();
     const sessionId = uuidv4();
 
-    // Get user's passkeys
+    // Get user's passkeys - FIXED: Use result.rows for database
     const userPasskeys = await PasskeyStore.findByUserId(user.id);
     const allowCredentials = userPasskeys.map(passkey => ({
       id: passkey.credential_id || passkey.credentialId,
@@ -988,7 +990,7 @@ app.post('/api/passkey/verify-high-value', authenticateToken, async (req, res) =
     const user = await UserStore.findByEmail(req.user.email);
     if (user) {
       // For in-memory storage, we can store this directly
-      // For database, we'd typically use a session store or Redis
+      // For database, you'd typically use a session store or Redis
       user.highValueAuthTimestamp = Date.now();
       user.highValueAuthValid = true;
       
@@ -1271,7 +1273,8 @@ app.get('/api/cart', authenticateToken, async (req, res) => {
 app.get('/api/debug/users', async (req, res) => {
   try {
     if (useDatabase) {
-      const dbUsers = await db`SELECT id, email, name, created_at FROM users`;
+      const result = await db`SELECT id, email, name, created_at FROM users`;
+      const dbUsers = result.rows || []; // FIXED: Added .rows
       res.json({
         storage: 'database',
         totalUsers: dbUsers.length,
