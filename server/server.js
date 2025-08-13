@@ -212,27 +212,34 @@ const UserStore = {
     if (useDatabase) {
       try {
         console.log('Database: Looking for user with email:', email);
-        const result = await db`SELECT * FROM users WHERE email = ${email}`;
-        console.log('Database query result:', result.length, 'users found');
         
-        if (result.length > 0) {
-          const dbUser = result[0];
-          console.log('Raw database user:', JSON.stringify(dbUser, null, 2));
+        const result = await db`SELECT * FROM users WHERE email = ${email}`;
+        console.log('Database query completed. Raw result structure:', {
+          hasRows: !!result.rows,
+          rowsLength: result.rows?.length,
+          resultKeys: Object.keys(result || {})
+        });
+        
+        // Use result.rows instead of result directly
+        const rows = result.rows || [];
+        
+        if (rows.length > 0) {
+          const dbUser = rows[0];
+          console.log('✅ Found user in database:', dbUser.email);
           
           // Convert database format to application format
-          // Handle both string and already-parsed JSON
           let cart = [];
           let passkeys = [];
           
           try {
-            cart = typeof dbUser.cart === 'string' ? JSON.parse(dbUser.cart) : (dbUser.cart || []);
+            cart = typeof dbUser.cart === 'string' ? JSON.parse(dbUser.cart) : (Array.isArray(dbUser.cart) ? dbUser.cart : []);
           } catch (e) {
             console.log('Cart parse error:', e.message);
             cart = [];
           }
           
           try {
-            passkeys = typeof dbUser.passkeys === 'string' ? JSON.parse(dbUser.passkeys) : (dbUser.passkeys || []);
+            passkeys = typeof dbUser.passkeys === 'string' ? JSON.parse(dbUser.passkeys) : (Array.isArray(dbUser.passkeys) ? dbUser.passkeys : []);
           } catch (e) {
             console.log('Passkeys parse error:', e.message);
             passkeys = [];
@@ -248,18 +255,13 @@ const UserStore = {
             createdAt: dbUser.created_at || dbUser.createdAt
           };
           
-          console.log('Converted user object:', { 
-            id: user.id, 
-            email: user.email, 
-            name: user.name,
-            cartItems: user.cart.length,
-            passkeysCount: user.passkeys.length
-          });
+          console.log('✅ Returning user object for:', user.email);
           return user;
+        } else {
+          console.log('❌ No rows found for email:', email);
+          return null;
         }
         
-        console.log('No user found in database for email:', email);
-        return null;
       } catch (error) {
         console.error('Database findByEmail error:', error);
         throw error;
@@ -277,16 +279,17 @@ const UserStore = {
         console.log('Database: Looking for user with ID:', userId);
         const result = await db`SELECT * FROM users WHERE id = ${userId}`;
         
-        if (result.length > 0) {
-          const dbUser = result[0];
+        const rows = result.rows || [];
+        if (rows.length > 0) {
+          const dbUser = rows[0];
           // Convert database format to application format
           const user = {
             id: dbUser.id,
             email: dbUser.email,
             password: dbUser.password,
             name: dbUser.name,
-            cart: JSON.parse(dbUser.cart || '[]'),
-            passkeys: JSON.parse(dbUser.passkeys || '[]'),
+            cart: typeof dbUser.cart === 'string' ? JSON.parse(dbUser.cart) : (Array.isArray(dbUser.cart) ? dbUser.cart : []),
+            passkeys: typeof dbUser.passkeys === 'string' ? JSON.parse(dbUser.passkeys) : (Array.isArray(dbUser.passkeys) ? dbUser.passkeys : []),
             createdAt: dbUser.created_at
           };
           return user;
@@ -507,7 +510,7 @@ const authenticateToken = async (req, res, next) => {
         if (useDatabase) {
           try {
             const allUsers = await db`SELECT email FROM users LIMIT 5`;
-            console.log('Available users in database:', allUsers.map(u => u.email));
+            console.log('Available users in database:', Array.isArray(allUsers) ? allUsers.map(u => u.email) : 'Not an array:', allUsers);
           } catch (dbError) {
             console.log('Could not query users:', dbError.message);
           }
