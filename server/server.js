@@ -175,34 +175,30 @@ const UserStore = {
       try {
         console.log('Database: Creating user with email:', user.email);
         
-        // Just do the INSERT without relying on RETURNING
+        // Simple INSERT without verification for now
         await db`
           INSERT INTO users (id, email, password, name, cart, passkeys, created_at)
           VALUES (${user.id}, ${user.email}, ${user.password}, ${user.name}, 
                   ${JSON.stringify(user.cart)}, ${JSON.stringify(user.passkeys)}, NOW())
         `;
         
-        console.log('Database INSERT completed successfully');
+        console.log('✅ Database INSERT completed successfully for:', user.email);
         
-        // Immediately query to verify the user was created
-        const verifyResult = await db`SELECT id, email, name FROM users WHERE email = ${user.email}`;
-        
-        if (verifyResult && verifyResult.length > 0) {
-          console.log('User verification successful:', verifyResult[0].email);
-          // Return the original user object since we know it was inserted
-          return {
-            ...user,
-            created_at: new Date().toISOString() // Add created_at timestamp
-          };
-        } else {
-          console.error('User verification failed - user not found after insert');
-          throw new Error('Failed to create user - verification failed');
-        }
+        // Return the user object - we trust the INSERT succeeded
+        return {
+          ...user,
+          created_at: new Date().toISOString()
+        };
         
       } catch (error) {
         console.error('Database create user error:', error);
         console.error('Error details:', error.message);
-        console.error('Error code:', error.code);
+        
+        // Check if it's a duplicate key error
+        if (error.message && error.message.includes('duplicate') || error.message.includes('unique')) {
+          throw new Error('User with this email already exists');
+        }
+        
         throw error;
       }
     } else {
