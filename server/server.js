@@ -990,15 +990,29 @@ app.post('/api/passkey/verify-high-value', authenticateToken, async (req, res) =
     const user = await UserStore.findByEmail(req.user.email);
     if (user) {
       // For in-memory storage, we can store this directly
-      // For database, you'd typically use a session store or Redis
+      // For database, we need to update the user record or use session storage
       user.highValueAuthTimestamp = Date.now();
       user.highValueAuthValid = true;
+      
+      console.log('✅ Setting high-value auth flags:', {
+        timestamp: user.highValueAuthTimestamp,
+        valid: user.highValueAuthValid,
+        storage: useDatabase ? 'database' : 'in-memory'
+      });
       
       if (!useDatabase) {
         // Update in-memory user
         users.set(user.email, user);
+      } else {
+        // For database, we need to store this somewhere persistent
+        // Since we don't have a sessions table, let's use a simple in-memory cache
+        global.highValueAuthSessions = global.highValueAuthSessions || new Map();
+        global.highValueAuthSessions.set(user.id, {
+          timestamp: Date.now(),
+          valid: true
+        });
+        console.log('✅ Stored high-value auth in global session cache for user:', user.id);
       }
-      // Note: For database, you might want to store this in a sessions table
     }
 
     authChallenges.delete(sessionId);
@@ -1040,25 +1054,71 @@ app.delete('/api/cart/:carId', authenticateToken, async (req, res) => {
 // Create order
 app.post('/api/orders', authenticateToken, async (req, res) => {
   try {
+    console.log('=== ORDER CREATION DEBUG ===');
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    console.log('Authenticated user:', req.user);
+    
     const { carIds, customerInfo, paymentInfo, requiresHighValueAuth } = req.body;
     const user = await UserStore.findByEmail(req.user.email);
     
+    console.log('User lookup result:', user ? `Found: ${user.email}` : 'Not found');
+    
     if (!user) {
+      console.error('❌ User not found during order creation for email:', req.user.email);
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const orderCars = carIds.map(id => cars.get(id)).filter(Boolean);
+    console.log('Car IDs to order:', carIds);
+    const orderCars = carIds.map(id => {
+      const car = cars.get(id);
+      console.log(`Car ${id}:`, car ? `Found: ${car.make} ${car.model}` : 'Not found');
+      return car;
+    }).filter(Boolean);
+    
+    console.log('Valid cars found:', orderCars.length);
+    
+    if (orderCars.length === 0) {
+      console.error('❌ No valid cars found for order');
+      return res.status(400).json({ error: 'No valid cars found for order' });
+    }
+
     const total = orderCars.reduce((sum, car) => sum + car.price, 0);
+    console.log('Order total calculated:', total);
 
     // ALWAYS require passkey auth for purchases over $50,000
     const isHighValue = total > 50000;
+    console.log('Is high value purchase:', isHighValue);
     
     if (isHighValue) {
+      console.log('High-value purchase detected, checking auth...');
+      
+      let authTimestamp = user.highValueAuthTimestamp;
+      let authValid = user.highValueAuthValid;
+      
+      // If using database, check global session cache
+      if (useDatabase) {
+        global.highValueAuthSessions = global.highValueAuthSessions || new Map();
+        const sessionAuth = global.highValueAuthSessions.get(user.id);
+        if (sessionAuth) {
+          authTimestamp = sessionAuth.timestamp;
+          authValid = sessionAuth.valid;
+          console.log('Using auth from global session cache:', sessionAuth);
+        } else {
+          console.log('No session auth found in global cache for user:', user.id);
+        }
+      }
+      
+      console.log('User auth timestamp:', authTimestamp);
+      console.log('User auth valid flag:', authValid);
+      
       // Verify high-value auth was completed recently (within last 5 minutes)
-      const authAge = Date.now() - (user.highValueAuthTimestamp || 0);
+      const authAge = Date.now() - (authTimestamp || 0);
       const fiveMinutes = 5 * 60 * 1000;
       
-      if (!user.highValueAuthValid || authAge > fiveMinutes) {
+      console.log('Auth age (ms):', authAge, 'Max allowed:', fiveMinutes);
+      
+      if (!authValid || authAge > fiveMinutes) {
+        console.log('❌ High-value auth required but not valid');
         return res.status(403).json({ 
           error: 'High-value transaction requires passkey authentication',
           requiresAuth: true,
@@ -1067,11 +1127,15 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
         });
       }
       
-      // Clear the high-value auth flag after use
-      user.highValueAuthValid = false;
-      user.highValueAuthTimestamp = null;
+      console.log('✅ High-value auth is valid, proceeding...');
       
-      if (!useDatabase) {
+      // Clear the high-value auth flag after use
+      if (useDatabase) {
+        global.highValueAuthSessions.delete(user.id);
+        console.log('✅ Cleared session auth from global cache');
+      } else {
+        user.highValueAuthValid = false;
+        user.highValueAuthTimestamp = null;
         users.set(user.email, user);
       }
     }
@@ -1089,23 +1153,51 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
       createdAt: new Date().toISOString()
     };
 
-    await OrderStore.create(order);
-    
-    // Clear cart
-    user.cart = [];
-    await UserStore.update(user.email, { cart: [] });
-
-    console.log(`✅ Order created: ${orderId}, Total: ${total.toLocaleString()}${order.highValueAuth ? ' (High-value with passkey auth)' : ''}`);
-
-    res.status(201).json({
-      message: 'Order created successfully',
-      orderId,
+    console.log('Creating order object:', {
+      id: orderId,
+      userId: user.id,
+      totalCars: orderCars.length,
       total,
-      highValueAuth: order.highValueAuth
+      isHighValue,
+      storage: useDatabase ? 'database' : 'in-memory'
     });
+
+    try {
+      const createdOrder = await OrderStore.create(order);
+      console.log('✅ Order created successfully in storage');
+      
+      // Clear cart
+      console.log('Clearing user cart...');
+      user.cart = [];
+      await UserStore.update(user.email, { cart: [] });
+      console.log('✅ Cart cleared successfully');
+
+      console.log(`✅ Order completed: ${orderId}, Total: ${total.toLocaleString()}${order.highValueAuth ? ' (High-value with passkey auth)' : ''}`);
+
+      res.status(201).json({
+        message: 'Order created successfully',
+        orderId,
+        total,
+        highValueAuth: order.highValueAuth
+      });
+    } catch (orderCreateError) {
+      console.error('❌ Order creation failed in storage:', orderCreateError);
+      console.error('Order create error details:', {
+        message: orderCreateError.message,
+        stack: orderCreateError.stack,
+        order: order
+      });
+      throw orderCreateError;
+    }
+    
   } catch (error) {
-    console.error('Order creation error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('❌ Order creation error (outer catch):', error);
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
