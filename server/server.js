@@ -36,9 +36,13 @@ const initDatabase = async () => {
     const { sql } = require('@vercel/postgres');
     
     // Test connection
+    console.log('Testing database connection...');
     await sql`SELECT NOW()`;
+    console.log('✅ Database connection successful');
     
     // Create tables if they don't exist
+    console.log('Creating database tables...');
+    
     await sql`
       CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY,
@@ -50,6 +54,7 @@ const initDatabase = async () => {
         created_at TIMESTAMP DEFAULT NOW()
       )
     `;
+    console.log('✅ Users table ready');
     
     await sql`
       CREATE TABLE IF NOT EXISTS passkeys (
@@ -61,6 +66,7 @@ const initDatabase = async () => {
         created_at TIMESTAMP DEFAULT NOW()
       )
     `;
+    console.log('✅ Passkeys table ready');
     
     await sql`
       CREATE TABLE IF NOT EXISTS orders (
@@ -75,13 +81,16 @@ const initDatabase = async () => {
         created_at TIMESTAMP DEFAULT NOW()
       )
     `;
+    console.log('✅ Orders table ready');
     
     db = sql;
     useDatabase = true;
-    console.log('🗄️ Database connected successfully');
+    console.log('🗄️ Database initialized successfully');
     
   } catch (error) {
-    console.log('⚠️ Database connection failed, falling back to in-memory storage:', error.message);
+    console.error('❌ Database initialization failed:', error.message);
+    console.error('Full error:', error);
+    console.log('⚠️ Falling back to in-memory storage');
     useDatabase = false;
   }
 };
@@ -163,48 +172,131 @@ const authChallenges = new Map();
 const UserStore = {
   async create(user) {
     if (useDatabase) {
-      const result = await db`
-        INSERT INTO users (id, email, password, name, cart, passkeys, created_at)
-        VALUES (${user.id}, ${user.email}, ${user.password}, ${user.name}, 
-                ${JSON.stringify(user.cart)}, ${JSON.stringify(user.passkeys)}, NOW())
-        RETURNING *
-      `;
-      return result[0];
+      try {
+        console.log('Database: Creating user with email:', user.email);
+        console.log('Full user object being saved:', {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          cartLength: user.cart.length,
+          passkeysLength: user.passkeys.length
+        });
+        
+        const result = await db`
+          INSERT INTO users (id, email, password, name, cart, passkeys, created_at)
+          VALUES (${user.id}, ${user.email}, ${user.password}, ${user.name}, 
+                  ${JSON.stringify(user.cart)}, ${JSON.stringify(user.passkeys)}, NOW())
+          RETURNING *
+        `;
+        
+        console.log('Database user created with email:', result[0]?.email);
+        console.log('Stored vs original email:', { 
+          original: user.email, 
+          stored: result[0]?.email,
+          match: user.email === result[0]?.email
+        });
+        
+        return result[0];
+      } catch (error) {
+        console.error('Database create user error:', error);
+        console.error('Error details:', error.message);
+        throw error;
+      }
     } else {
       users.set(user.email, user);
+      console.log('In-memory user created:', user.email);
       return user;
     }
   },
 
   async findByEmail(email) {
     if (useDatabase) {
-      const result = await db`SELECT * FROM users WHERE email = ${email}`;
-      if (result.length > 0) {
-        const user = result[0];
-        return {
-          ...user,
-          cart: JSON.parse(user.cart || '[]'),
-          passkeys: JSON.parse(user.passkeys || '[]')
-        };
+      try {
+        console.log('Database: Looking for user with email:', email);
+        const result = await db`SELECT * FROM users WHERE email = ${email}`;
+        console.log('Database query result:', result.length, 'users found');
+        
+        if (result.length > 0) {
+          const dbUser = result[0];
+          console.log('Raw database user:', JSON.stringify(dbUser, null, 2));
+          
+          // Convert database format to application format
+          // Handle both string and already-parsed JSON
+          let cart = [];
+          let passkeys = [];
+          
+          try {
+            cart = typeof dbUser.cart === 'string' ? JSON.parse(dbUser.cart) : (dbUser.cart || []);
+          } catch (e) {
+            console.log('Cart parse error:', e.message);
+            cart = [];
+          }
+          
+          try {
+            passkeys = typeof dbUser.passkeys === 'string' ? JSON.parse(dbUser.passkeys) : (dbUser.passkeys || []);
+          } catch (e) {
+            console.log('Passkeys parse error:', e.message);
+            passkeys = [];
+          }
+          
+          const user = {
+            id: dbUser.id,
+            email: dbUser.email,
+            password: dbUser.password,
+            name: dbUser.name,
+            cart: cart,
+            passkeys: passkeys,
+            createdAt: dbUser.created_at || dbUser.createdAt
+          };
+          
+          console.log('Converted user object:', { 
+            id: user.id, 
+            email: user.email, 
+            name: user.name,
+            cartItems: user.cart.length,
+            passkeysCount: user.passkeys.length
+          });
+          return user;
+        }
+        
+        console.log('No user found in database for email:', email);
+        return null;
+      } catch (error) {
+        console.error('Database findByEmail error:', error);
+        throw error;
       }
-      return null;
     } else {
-      return users.get(email) || null;
+      const user = users.get(email);
+      console.log('In-memory: Found user for email:', email, user ? 'yes' : 'no');
+      return user || null;
     }
   },
 
   async findById(userId) {
     if (useDatabase) {
-      const result = await db`SELECT * FROM users WHERE id = ${userId}`;
-      if (result.length > 0) {
-        const user = result[0];
-        return {
-          ...user,
-          cart: JSON.parse(user.cart || '[]'),
-          passkeys: JSON.parse(user.passkeys || '[]')
-        };
+      try {
+        console.log('Database: Looking for user with ID:', userId);
+        const result = await db`SELECT * FROM users WHERE id = ${userId}`;
+        
+        if (result.length > 0) {
+          const dbUser = result[0];
+          // Convert database format to application format
+          const user = {
+            id: dbUser.id,
+            email: dbUser.email,
+            password: dbUser.password,
+            name: dbUser.name,
+            cart: JSON.parse(dbUser.cart || '[]'),
+            passkeys: JSON.parse(dbUser.passkeys || '[]'),
+            createdAt: dbUser.created_at
+          };
+          return user;
+        }
+        return null;
+      } catch (error) {
+        console.error('Database findById error:', error);
+        throw error;
       }
-      return null;
     } else {
       // For in-memory, search through all users
       for (const [email, user] of users.entries()) {
@@ -218,19 +310,42 @@ const UserStore = {
 
   async update(email, updates) {
     if (useDatabase) {
-      const result = await db`
-        UPDATE users 
-        SET cart = ${JSON.stringify(updates.cart || [])},
-            passkeys = ${JSON.stringify(updates.passkeys || [])}
-        WHERE email = ${email}
-        RETURNING *
-      `;
-      return result[0];
+      try {
+        console.log('Database: Updating user:', email, 'with:', updates);
+        const result = await db`
+          UPDATE users 
+          SET cart = ${JSON.stringify(updates.cart || [])},
+              passkeys = ${JSON.stringify(updates.passkeys || [])}
+          WHERE email = ${email}
+          RETURNING *
+        `;
+        
+        if (result.length > 0) {
+          const dbUser = result[0];
+          // Convert database format to application format
+          const user = {
+            id: dbUser.id,
+            email: dbUser.email,
+            password: dbUser.password,
+            name: dbUser.name,
+            cart: JSON.parse(dbUser.cart || '[]'),
+            passkeys: JSON.parse(dbUser.passkeys || '[]'),
+            createdAt: dbUser.created_at
+          };
+          console.log('Database user updated successfully');
+          return user;
+        }
+        return null;
+      } catch (error) {
+        console.error('Database update error:', error);
+        throw error;
+      }
     } else {
       const user = users.get(email);
       if (user) {
         Object.assign(user, updates);
         users.set(email, user);
+        console.log('In-memory user updated:', email);
         return user;
       }
       return null;
@@ -377,14 +492,34 @@ const authenticateToken = async (req, res, next) => {
     }
     
     try {
+      console.log('=== AUTH MIDDLEWARE DEBUG ===');
+      console.log('Token decoded user email:', decoded.email);
+      console.log('Token decoded user ID:', decoded.id);
+      console.log('Using database:', useDatabase);
+      
       // Try to find user in storage
       const user = await UserStore.findByEmail(decoded.email);
+      console.log('User lookup result:', user ? `Found: ${user.email}` : 'Not found');
+      
       if (!user) {
-        console.log('User not found for email:', decoded.email);
+        console.log('❌ User not found for email:', decoded.email);
+        
+        // Let's also try to check what users exist
+        if (useDatabase) {
+          try {
+            const allUsers = await db`SELECT email FROM users LIMIT 5`;
+            console.log('Available users in database:', allUsers.map(u => u.email));
+          } catch (dbError) {
+            console.log('Could not query users:', dbError.message);
+          }
+        } else {
+          console.log('Available users in memory:', Array.from(users.keys()));
+        }
+        
         return res.status(404).json({ error: 'User not found' });
       }
       
-      console.log('✅ User authenticated:', { id: user.id, email: user.email });
+      console.log('✅ User authenticated successfully:', { id: user.id, email: user.email });
       req.user = decoded;
       next();
     } catch (error) {
@@ -401,7 +536,15 @@ app.post('/api/register', async (req, res) => {
   try {
     const { email, password, name } = req.body;
 
-    console.log('Registration attempt for email:', email);
+    console.log('=== REGISTRATION DEBUG ===');
+    console.log('Registration request body:', { email, name, passwordLength: password?.length });
+    console.log('Email character analysis:', {
+      email: email,
+      length: email?.length,
+      hasAt: email?.includes('@'),
+      charCodes: email?.split('').map(c => `${c}:${c.charCodeAt(0)}`)
+    });
+    console.log('Using database:', useDatabase);
 
     // Check if user already exists
     const existingUser = await UserStore.findByEmail(email);
@@ -415,7 +558,7 @@ app.post('/api/register', async (req, res) => {
 
     const user = {
       id: userId,
-      email,
+      email: email, // Make sure we're using the exact email from request
       password: hashedPassword,
       name,
       cart: [],
@@ -423,20 +566,38 @@ app.post('/api/register', async (req, res) => {
       createdAt: new Date().toISOString()
     };
 
-    await UserStore.create(user);
+    console.log('Creating user object:', { 
+      id: userId, 
+      email: user.email, 
+      name: user.name,
+      emailMatches: email === user.email
+    });
+    
+    const createdUser = await UserStore.create(user);
+    console.log('User creation result:', createdUser ? 'success' : 'failed');
+    
+    if (createdUser) {
+      console.log('Created user email verification:', {
+        original: email,
+        created: createdUser.email,
+        match: email === createdUser.email
+      });
+    }
 
-    const token = jwt.sign({ id: userId, email }, JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ id: userId, email: email }, JWT_SECRET, { expiresIn: '24h' });
 
-    console.log('User registered successfully:', { id: userId, email, name });
+    console.log('JWT token created with email:', email);
+    console.log('Registration completed successfully');
 
     res.status(201).json({
       message: 'User created successfully',
       token,
-      user: { id: userId, email, name }
+      user: { id: userId, email: email, name }
     });
   } catch (error) {
     console.error('Registration error:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
