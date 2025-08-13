@@ -322,16 +322,17 @@ const UserStore = {
           RETURNING *
         `;
         
-        if (result.length > 0) {
-          const dbUser = result[0];
+        const rows = result.rows || [];
+        if (rows.length > 0) {
+          const dbUser = rows[0];
           // Convert database format to application format
           const user = {
             id: dbUser.id,
             email: dbUser.email,
             password: dbUser.password,
             name: dbUser.name,
-            cart: JSON.parse(dbUser.cart || '[]'),
-            passkeys: JSON.parse(dbUser.passkeys || '[]'),
+            cart: typeof dbUser.cart === 'string' ? JSON.parse(dbUser.cart) : (Array.isArray(dbUser.cart) ? dbUser.cart : []),
+            passkeys: typeof dbUser.passkeys === 'string' ? JSON.parse(dbUser.passkeys) : (Array.isArray(dbUser.passkeys) ? dbUser.passkeys : []),
             createdAt: dbUser.created_at
           };
           console.log('Database user updated successfully');
@@ -364,7 +365,7 @@ const PasskeyStore = {
                 ${passkey.userId}, ${passkey.counter}, NOW())
         RETURNING *
       `;
-      return result[0];
+      return result.rows?.[0] || passkey;
     } else {
       passkeys.set(passkey.credentialId, passkey);
       return passkey;
@@ -374,7 +375,7 @@ const PasskeyStore = {
   async findByCredentialId(credentialId) {
     if (useDatabase) {
       const result = await db`SELECT * FROM passkeys WHERE credential_id = ${credentialId}`;
-      return result[0] || null;
+      return result.rows?.[0] || null;
     } else {
       return passkeys.get(credentialId) || null;
     }
@@ -383,9 +384,18 @@ const PasskeyStore = {
   async findByUserId(userId) {
     if (useDatabase) {
       const result = await db`SELECT * FROM passkeys WHERE user_id = ${userId}`;
-      return result;
+      return result.rows || [];
     } else {
       return Array.from(passkeys.values()).filter(pk => pk.userId === userId);
+    }
+  },
+
+  async findById(passkeyId) {
+    if (useDatabase) {
+      const result = await db`SELECT * FROM passkeys WHERE id = ${passkeyId}`;
+      return result.rows?.[0] || null;
+    } else {
+      return Array.from(passkeys.values()).find(pk => pk.id === passkeyId) || null;
     }
   }
 };
@@ -400,7 +410,7 @@ const OrderStore = {
                 ${order.total}, ${order.status}, ${order.highValueAuth}, NOW())
         RETURNING *
       `;
-      return result[0];
+      return result.rows?.[0] || order;
     } else {
       orders.set(order.id, order);
       return order;
@@ -410,7 +420,8 @@ const OrderStore = {
   async findByUserId(userId) {
     if (useDatabase) {
       const result = await db`SELECT * FROM orders WHERE user_id = ${userId} ORDER BY created_at DESC`;
-      return result.map(order => ({
+      const rows = result.rows || [];
+      return rows.map(order => ({
         ...order,
         cars: JSON.parse(order.cars),
         customerInfo: JSON.parse(order.customer_info),
@@ -1086,18 +1097,35 @@ app.get('/api/profile', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const userPasskeys = await PasskeyStore.findByUserId(user.id);
-    const passkeyInfo = userPasskeys.map(passkey => ({ 
-      id: passkey.id, 
-      createdAt: passkey.created_at || passkey.createdAt 
-    }));
+    // Ensure passkeys is an array
+    const userPasskeysArray = Array.isArray(user.passkeys) ? user.passkeys : [];
+    
+    const userPasskeys = await Promise.all(
+      userPasskeysArray.map(async (passkeyId) => {
+        try {
+          const passkey = await PasskeyStore.findById ? 
+            await PasskeyStore.findById(passkeyId) : 
+            Array.from(passkeys.values()).find(pk => pk.id === passkeyId);
+          return passkey ? { 
+            id: passkey.id, 
+            createdAt: passkey.created_at || passkey.createdAt 
+          } : null;
+        } catch (error) {
+          console.log('Error finding passkey:', passkeyId, error.message);
+          return null;
+        }
+      })
+    );
+
+    // Filter out null passkeys
+    const validPasskeys = userPasskeys.filter(Boolean);
 
     res.json({
       id: user.id,
       email: user.email,
       name: user.name,
-      passkeys: passkeyInfo,
-      createdAt: user.created_at || user.createdAt
+      passkeys: validPasskeys,
+      createdAt: user.createdAt || user.created_at
     });
   } catch (error) {
     console.error('Get profile error:', error);
