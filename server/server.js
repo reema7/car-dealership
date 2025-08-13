@@ -32,16 +32,22 @@ const initDatabase = async () => {
   }
 
   try {
+    // In production, ALWAYS try to use database if environment variables exist
+    if (!process.env.POSTGRES_URL) {
+      console.log('❌ No POSTGRES_URL found, falling back to in-memory storage');
+      useDatabase = false;
+      return;
+    }
+
     // Try to connect to Vercel Postgres
     const { sql } = require('@vercel/postgres');
     
-    // Test connection
-    console.log('Testing database connection...');
-    await sql`SELECT NOW()`;
-    console.log('✅ Database connection successful');
+    console.log('🔄 Testing database connection...');
+    const testResult = await sql`SELECT NOW()`;
+    console.log('✅ Database connection test successful');
     
     // Create tables if they don't exist
-    console.log('Creating database tables...');
+    console.log('🔄 Ensuring database tables exist...');
     
     await sql`
       CREATE TABLE IF NOT EXISTS users (
@@ -85,12 +91,23 @@ const initDatabase = async () => {
     
     db = sql;
     useDatabase = true;
-    console.log('🗄️ Database initialized successfully');
+    console.log('🗄️ Database initialization completed successfully');
     
   } catch (error) {
     console.error('❌ Database initialization failed:', error.message);
-    console.error('Full error:', error);
-    console.log('⚠️ Falling back to in-memory storage');
+    console.error('Error details:', {
+      name: error.name,
+      code: error.code,
+      stack: error.stack
+    });
+    
+    // In production, if database fails, we should still try to use it on next request
+    // Don't fall back to in-memory as it causes data inconsistency
+    if (process.env.POSTGRES_URL) {
+      console.log('🔄 Database URL exists but connection failed - will retry on next request');
+      console.log('⚠️ CRITICAL: Using in-memory fallback can cause data inconsistency!');
+    }
+    
     useDatabase = false;
   }
 };
@@ -159,7 +176,15 @@ const detectAI = (req, res, next) => {
   next();
 };
 
+// Middleware to log storage mode for each request
+const logStorageMode = (req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`📊 [${timestamp}] ${req.method} ${req.path} - Storage: ${useDatabase ? 'DATABASE' : 'IN-MEMORY'}`);
+  next();
+};
+
 app.use(detectAI);
+app.use(logStorageMode);
 
 // In-memory storage (fallback for localhost)
 const users = new Map();
@@ -171,6 +196,11 @@ const authChallenges = new Map();
 // Database abstraction layer
 const UserStore = {
   async create(user) {
+    // Force database check in production
+    if (!isDevelopment && !useDatabase && process.env.POSTGRES_URL) {
+      throw new Error('Database should be available in production but useDatabase is false');
+    }
+    
     if (useDatabase) {
       try {
         console.log('Database: Creating user with email:', user.email);
